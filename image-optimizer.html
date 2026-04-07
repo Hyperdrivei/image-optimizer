@@ -106,6 +106,10 @@
 
 <div class="section">
   <label class="resize-toggle">
+    <input type="checkbox" id="enable2x">
+    <span>Also generate a 2x version (double width &amp; height)</span>
+  </label>
+  <label class="resize-toggle" style="margin-top:0.5rem;">
     <input type="checkbox" id="enableResize">
     <span>Resize before compressing</span>
   </label>
@@ -224,21 +228,22 @@ function getBaseName(name) {
   return name.replace(/\.[^.]+$/, '');
 }
 
-function resizeImage(img, maxW, maxH, mode) {
-  let sw = img.width, sh = img.height, dw = sw, dh = sh;
+function resizeImage(img, maxW, maxH, mode, srcCanvas) {
+  const sw = img.width, sh = img.height;
+  const src = srcCanvas || img;
   const rw = maxW / sw, rh = maxH / sh;
   if (mode === 'contain') {
     const r = Math.min(1, Math.min(rw, rh));
-    dw = Math.round(sw * r); dh = Math.round(sh * r);
+    const dw = Math.round(sw * r), dh = Math.round(sh * r);
     const c = document.createElement('canvas');
     c.width = dw; c.height = dh;
-    c.getContext('2d').drawImage(img, 0, 0, dw, dh);
+    c.getContext('2d').drawImage(src, 0, 0, dw, dh);
     return c;
   } else if (mode === 'stretch') {
-    dw = Math.min(sw, maxW); dh = Math.min(sh, maxH);
+    const dw = Math.min(sw, maxW), dh = Math.min(sh, maxH);
     const c = document.createElement('canvas');
     c.width = dw; c.height = dh;
-    c.getContext('2d').drawImage(img, 0, 0, dw, dh);
+    c.getContext('2d').drawImage(src, 0, 0, dw, dh);
     return c;
   } else {
     const r = Math.max(rw, rh);
@@ -246,8 +251,7 @@ function resizeImage(img, maxW, maxH, mode) {
     const ox = (tw - maxW) / 2, oy = (th - maxH) / 2;
     const c = document.createElement('canvas');
     c.width = Math.min(sw, maxW); c.height = Math.min(sh, maxH);
-    const ctx = c.getContext('2d');
-    ctx.drawImage(img, -ox, -oy, tw, th);
+    c.getContext('2d').drawImage(src, -ox, -oy, tw, th);
     return c;
   }
 }
@@ -284,6 +288,7 @@ processBtn.addEventListener('click', async () => {
   const maxKB = +maxSizeSlider.value * 1024;
   const startQ = +qualitySlider.value;
   const doResize = enableResize.checked;
+  const do2x = document.getElementById('enable2x').checked;
   const maxW = parseInt(document.getElementById('maxW').value) || 1920;
   const maxH = parseInt(document.getElementById('maxH').value) || 1080;
 
@@ -295,33 +300,40 @@ processBtn.addEventListener('click', async () => {
   results = [];
   dlAllBtn.style.display = 'none';
 
-  const total = files.length * fmts.length;
+  const variants = do2x ? ['1x', '2x'] : ['1x'];
+  const total = files.length * fmts.length * variants.length;
   let done = 0;
 
   for (const file of files) {
     let img;
-    try { img = await loadImage(file); } catch { done += fmts.length; continue; }
+    try { img = await loadImage(file); } catch { done += fmts.length * variants.length; continue; }
 
-    let canvas = document.createElement('canvas');
-    canvas.width = img.width; canvas.height = img.height;
-    canvas.getContext('2d').drawImage(img, 0, 0);
+    for (const variant of variants) {
+      const scale = variant === '2x' ? 2 : 1;
 
-    if (doResize) canvas = resizeImage(img, maxW, maxH, fitMode);
+      let canvas = document.createElement('canvas');
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    for (const fmt of fmts) {
-      const mime = fmt === 'jpeg' ? 'image/jpeg' : fmt === 'png' ? 'image/png' : fmt === 'avif' ? 'image/avif' : 'image/webp';
-      let blob, finalQ;
-      if (fmt === 'png') {
-        blob = await canvasToBlob(canvas, mime, 1);
-        finalQ = null;
-      } else {
-        const res2 = await compressToTarget(canvas, mime, maxKB, startQ);
-        blob = res2.blob; finalQ = res2.q;
+      if (doResize) canvas = resizeImage({ width: canvas.width, height: canvas.height, _canvas: canvas }, maxW * scale, maxH * scale, fitMode, canvas);
+
+      for (const fmt of fmts) {
+        const mime = fmt === 'jpeg' ? 'image/jpeg' : fmt === 'png' ? 'image/png' : fmt === 'avif' ? 'image/avif' : 'image/webp';
+        let blob, finalQ;
+        if (fmt === 'png') {
+          blob = await canvasToBlob(canvas, mime, 1);
+          finalQ = null;
+        } else {
+          const res2 = await compressToTarget(canvas, mime, maxKB, startQ);
+          blob = res2.blob; finalQ = res2.q;
+        }
+        const suffix = variant === '2x' ? '@2x' : '';
+        const outName = getBaseName(file.name) + suffix + '.' + fmt;
+        results.push({ blob, name: outName, origSize: file.size, fmt, q: finalQ, variant });
+        done++;
+        progressBar.style.width = Math.round(done / total * 100) + '%';
       }
-      const outName = getBaseName(file.name) + '.' + fmt;
-      results.push({ blob, name: outName, origSize: file.size, fmt, q: finalQ });
-      done++;
-      progressBar.style.width = Math.round(done / total * 100) + '%';
     }
   }
 
@@ -339,7 +351,7 @@ function renderResults() {
     const item = document.createElement('div');
     item.className = 'result-item';
     item.innerHTML = `
-      <div><div class="result-name">${r.name}</div><div class="result-meta">${fmtSize(r.origSize)} → ${fmtSize(r.blob.size)}${r.q !== null ? ' · q' + r.q : ''} · ${pct >= 0 ? '-' + pct : '+' + Math.abs(pct)}%</div></div>
+      <div>      <div class="result-name">${r.name}${r.variant === '2x' ? ' <span style="font-size:11px;padding:1px 6px;border-radius:4px;background:var(--color-background-info);color:var(--color-text-info);font-weight:500;">2x</span>' : ''}</div><div class="result-meta">${fmtSize(r.origSize)} → ${fmtSize(r.blob.size)}${r.q !== null ? ' · q' + r.q : ''} · ${pct >= 0 ? '-' + pct : '+' + Math.abs(pct)}%</div></div>
       <span class="badge ${underTarget ? 'badge-success' : 'badge-warn'}">${underTarget ? 'Under 100 KB' : 'Over 100 KB'}</span>
       <button class="btn-dl" data-i="${i}">Download</button>`;
     resultsList.appendChild(item);
